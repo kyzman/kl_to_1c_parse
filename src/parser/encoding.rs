@@ -3,8 +3,8 @@ use encoding_rs::{Decoder, Encoding, IBM866, UTF_8, WINDOWS_1251};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileEncoding {
     Utf8,
-    Windows1251,
-    Cp866,
+    Windows1251, // Значение "Windows" в поле Кодировка
+    Cp866,       // Значение "DOS" в поле Кодировка
 }
 
 impl FileEncoding {
@@ -16,14 +16,12 @@ impl FileEncoding {
         }
     }
 
-    pub fn from_header_value(value: &str) -> Option<Self> {
-        let value = value.trim().to_lowercase();
-        match value.as_str() {
-            "utf-8" | "utf8" | "unicode" => Some(FileEncoding::Utf8),
-            "windows-1251" | "windows1251" | "cp1251" | "1251" | "ansi" => {
-                Some(FileEncoding::Windows1251)
-            }
-            "cp866" | "866" | "dos" | "ibm866" => Some(FileEncoding::Cp866),
+    /// Парсит значение поля "Кодировка=..." из стандарта 1C
+    pub fn from_standard_value(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "dos" => Some(FileEncoding::Cp866),
+            "windows" => Some(FileEncoding::Windows1251),
+            "utf-8" | "utf8" => Some(FileEncoding::Utf8),
             _ => None,
         }
     }
@@ -36,83 +34,82 @@ impl FileEncoding {
         self.to_encoding().new_decoder()
     }
 
-    /// Эвристическое определение кодировки по байтам
-    /// Анализирует паттерны байт характерные для разных кодировок
-    pub fn detect_from_bytes(bytes: &[u8]) -> Self {
+    /// ⭐ Ищет ТОЛЬКО ASCII-паттерны =DOS, =Windows, =UTF-8 в байтах
+    /// Без эвристики! Если не найдено — возвращаем Windows-1251 по умолчанию
+    pub fn detect_from_bytes_standard(bytes: &[u8]) -> Self {
         if bytes.is_empty() {
-            return FileEncoding::default_1c();
+            return Self::default_1c();
         }
 
-        let mut utf8_score = 0;
-        let mut cp1251_score = 0;
-        let mut cp866_score = 0;
-        let mut invalid_utf8 = false;
-
-        let mut i = 0;
-        while i < bytes.len() {
-            let byte = bytes[i];
-
-            if byte < 0x80 {
-                // ASCII - валиден для всех кодировок
-                i += 1;
-                continue;
-            }
-
-            // Проверяем UTF-8 последовательности
-            if byte >= 0xC0 && byte <= 0xDF {
-                // 2-байтная последовательность UTF-8
-                if i + 1 < bytes.len() && bytes[i + 1] >= 0x80 && bytes[i + 1] <= 0xBF {
-                    utf8_score += 2;
-                    i += 2;
-                    continue;
-                }
-                invalid_utf8 = true;
-            } else if byte >= 0xE0 && byte <= 0xEF {
-                // 3-байтная последовательность UTF-8
-                if i + 2 < bytes.len()
-                    && bytes[i + 1] >= 0x80
-                    && bytes[i + 1] <= 0xBF
-                    && bytes[i + 2] >= 0x80
-                    && bytes[i + 2] <= 0xBF
+        // Ищем "=DOS" в байтах
+        for i in 0..bytes.len().saturating_sub(3) {
+            if bytes[i] == b'='
+                && i + 3 < bytes.len()
+                && bytes[i + 1] == b'D'
+                && bytes[i + 2] == b'O'
+                && bytes[i + 3] == b'S'
+            {
+                let after = i + 4;
+                if after >= bytes.len()
+                    || bytes[after] == b'\n'
+                    || bytes[after] == b'\r'
+                    || bytes[after] == b' '
+                    || bytes[after] == b'\t'
                 {
-                    utf8_score += 3;
-                    i += 3;
-                    continue;
-                }
-                invalid_utf8 = true;
-            } else if byte >= 0x80 && byte <= 0xBF {
-                // Продолжение UTF-8 без начала - невалидно
-                invalid_utf8 = true;
-            }
-
-            // Для single-byte кодировок считаем байты в диапазонах кириллицы
-            if byte >= 0x80 {
-                cp1251_score += 1;
-                cp866_score += 1;
-
-                // Специфичные диапазоны
-                if byte >= 0x80 && byte <= 0x9F {
-                    cp1251_score += 1; // Чаще в Windows-1251
-                }
-                if byte >= 0xF0 {
-                    cp866_score += 1; // Чаще в CP-866
+                    return FileEncoding::Cp866;
                 }
             }
-
-            i += 1;
         }
 
-        // Если UTF-8 валиден и есть кириллические символы - это UTF-8
-        if !invalid_utf8 && utf8_score > cp1251_score && utf8_score > cp866_score {
-            return FileEncoding::Utf8;
+        // Ищем "=Windows" в байтах
+        for i in 0..bytes.len().saturating_sub(7) {
+            if bytes[i] == b'='
+                && i + 7 < bytes.len()
+                && bytes[i + 1] == b'W'
+                && bytes[i + 2] == b'i'
+                && bytes[i + 3] == b'n'
+                && bytes[i + 4] == b'd'
+                && bytes[i + 5] == b'o'
+                && bytes[i + 6] == b'w'
+                && bytes[i + 7] == b's'
+            {
+                let after = i + 8;
+                if after >= bytes.len()
+                    || bytes[after] == b'\n'
+                    || bytes[after] == b'\r'
+                    || bytes[after] == b' '
+                    || bytes[after] == b'\t'
+                {
+                    return FileEncoding::Windows1251;
+                }
+            }
         }
 
-        // Иначе выбираем между Windows-1251 и CP-866
-        if cp1251_score >= cp866_score {
-            FileEncoding::Windows1251
-        } else {
-            FileEncoding::Cp866
+        // Ищем "=UTF-8" или "=utf8"
+        for i in 0..bytes.len().saturating_sub(5) {
+            if bytes[i] == b'='
+                && i + 5 < bytes.len()
+                && bytes[i + 1] == b'U'
+                && bytes[i + 2] == b'T'
+                && bytes[i + 3] == b'F'
+                && bytes[i + 4] == b'-'
+                && bytes[i + 5] == b'8'
+            {
+                return FileEncoding::Utf8;
+            }
+            if i + 4 < bytes.len()
+                && bytes[i] == b'='
+                && bytes[i + 1] == b'u'
+                && bytes[i + 2] == b't'
+                && bytes[i + 3] == b'f'
+                && bytes[i + 4] == b'8'
+            {
+                return FileEncoding::Utf8;
+            }
         }
+
+        // ⭐ По умолчанию Windows-1251 (если поле Кодировка не найдено)
+        FileEncoding::Windows1251
     }
 }
 
@@ -122,7 +119,6 @@ impl Default for FileEncoding {
     }
 }
 
-/// Конвертирует байты в строку с учётом кодировки
 pub fn decode_bytes(bytes: &[u8], encoding: FileEncoding) -> String {
     let (cow, _, _) = encoding.to_encoding().decode(bytes);
     cow.into_owned()
@@ -133,41 +129,75 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_from_header_value() {
+    fn test_from_standard_value() {
         assert_eq!(
-            FileEncoding::from_header_value("UTF-8"),
-            Some(FileEncoding::Utf8)
+            FileEncoding::from_standard_value("DOS"),
+            Some(FileEncoding::Cp866)
         );
         assert_eq!(
-            FileEncoding::from_header_value("windows-1251"),
+            FileEncoding::from_standard_value("Windows"),
             Some(FileEncoding::Windows1251)
         );
         assert_eq!(
-            FileEncoding::from_header_value("CP866"),
+            FileEncoding::from_standard_value("UTF-8"),
+            Some(FileEncoding::Utf8)
+        );
+        assert_eq!(
+            FileEncoding::from_standard_value("dos"),
             Some(FileEncoding::Cp866)
         );
-        assert_eq!(FileEncoding::from_header_value("Unknown"), None);
+        assert_eq!(
+            FileEncoding::from_standard_value("WINDOWS"),
+            Some(FileEncoding::Windows1251)
+        );
+        assert_eq!(FileEncoding::from_standard_value("Unknown"), None);
     }
 
     #[test]
-    fn test_new_decoder() {
-        let decoder = FileEncoding::Windows1251.new_decoder();
-        assert_eq!(decoder.encoding(), WINDOWS_1251);
+    fn test_detect_from_bytes_with_dos() {
+        let mut bytes = b"1CClientBankExchange\n".to_vec();
+        bytes.extend_from_slice(&[0xCB, 0xEF, 0xE4, 0xE8, 0xF0, 0xEF, 0xB2, 0xEA, 0xE0]); // Кодировка (CP-866)
+        bytes.extend_from_slice(b"=DOS\n");
+        let detected = FileEncoding::detect_from_bytes_standard(&bytes);
+        assert_eq!(detected, FileEncoding::Cp866);
+    }
+
+    #[test]
+    fn test_detect_from_bytes_with_windows() {
+        let mut bytes = b"1CClientBankExchange\n".to_vec();
+        bytes.extend_from_slice(&[0xCA, 0xEE, 0xE4, 0xE8, 0xF0, 0xEE, 0xB2, 0xEA, 0xE0]); // Кодировка (Windows-1251)
+        bytes.extend_from_slice(b"=Windows\n");
+        let detected = FileEncoding::detect_from_bytes_standard(&bytes);
+        assert_eq!(detected, FileEncoding::Windows1251);
+    }
+
+    #[test]
+    fn test_detect_from_bytes_with_utf8() {
+        let bytes = "1CClientBankExchange\nКодировка=UTF-8\nВерсияФормата=1.03".as_bytes();
+        let detected = FileEncoding::detect_from_bytes_standard(bytes);
+        assert_eq!(detected, FileEncoding::Utf8);
+    }
+
+    #[test]
+    fn test_detect_from_bytes_default() {
+        // Если нет поля Кодировка — возвращаем Windows-1251 по умолчанию
+        let bytes =
+            b"1CClientBankExchange\n\xC2\xE5\xF0\xF1\xE8\xFF\xD4\xEE\xF0\xEC\xE0\xF2\xE0=1.03\n";
+        let detected = FileEncoding::detect_from_bytes_standard(bytes);
+        assert_eq!(detected, FileEncoding::Windows1251);
     }
 
     #[test]
     fn test_decode_windows1251() {
-        // "Привет" в Windows-1251
-        let bytes: Vec<u8> = vec![0xCF, 0xF0, 0xE8, 0xB2, 0xE5, 0xF2];
-        let text = decode_bytes(&bytes, FileEncoding::Windows1251);
+        let bytes = b"\xCF\xF0\xE8\xE2\xE5\xF2";
+        let text = decode_bytes(bytes, FileEncoding::Windows1251);
         assert_eq!(text, "Привет");
     }
 
     #[test]
     fn test_decode_cp866() {
-        // "Привет" в CP-866
-        let bytes: Vec<u8> = vec![0xE2, 0xF0, 0xE8, 0xB2, 0xE5, 0xF2];
-        let text = decode_bytes(&bytes, FileEncoding::Cp866);
+        let bytes = b"\x8F\xE0\xA8\xA2\xA5\xE2";
+        let text = decode_bytes(bytes, FileEncoding::Cp866);
         assert_eq!(text, "Привет");
     }
 
@@ -176,30 +206,5 @@ mod tests {
         let bytes = "Привет".as_bytes();
         let text = decode_bytes(bytes, FileEncoding::Utf8);
         assert_eq!(text, "Привет");
-    }
-
-    #[test]
-    fn test_detect_utf8() {
-        let bytes = "1CClientBankExchange\nВерсияФормата=1.03".as_bytes();
-        let detected = FileEncoding::detect_from_bytes(bytes);
-        assert_eq!(detected, FileEncoding::Utf8);
-    }
-
-    #[test]
-    fn test_detect_windows1251() {
-        // "1CClientBankExchange\nВерсия" в Windows-1251
-        let mut bytes = b"1CClientBankExchange\n".to_vec();
-        bytes.extend_from_slice(&[0xC2, 0xE5, 0xF0, 0xF1, 0xE8, 0xFF]); // Версия
-        let detected = FileEncoding::detect_from_bytes(&bytes);
-        assert_eq!(detected, FileEncoding::Windows1251);
-    }
-
-    #[test]
-    fn test_detect_cp866() {
-        // "1CClientBankExchange\nВерсия" в CP-866
-        let mut bytes = b"1CClientBankExchange\n".to_vec();
-        bytes.extend_from_slice(&[0xE2, 0xF0, 0xE8, 0xF1, 0xE8, 0xFF]); // Версия
-        let detected = FileEncoding::detect_from_bytes(&bytes);
-        assert_eq!(detected, FileEncoding::Cp866);
     }
 }
