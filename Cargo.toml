@@ -1,0 +1,24 @@
+[package]
+name = "load1c"
+version = "0.1.0"
+edition = "2024"
+authors = ["Andrew"]
+description = "High-performance parser for 1CClientBankExchange format"
+
+[dependencies]
+# Для буферизированного чтения (в стандартной библиотеке)
+# Для будущего расширения:
+# postgres = { version = "0.19", optional = true }
+# tokio = { version = "1", features = ["full"], optional = true }
+
+[features]
+default = []
+postgres = []  # Фича для будущей интеграции с БД
+
+[[bin]]
+name = "load1c"
+path = "src/main.rs"
+
+[lib]
+name = "load1c"
+path = "src/lib.rs"
