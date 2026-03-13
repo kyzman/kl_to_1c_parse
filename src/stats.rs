@@ -1,10 +1,10 @@
 use crate::parser::models::{FileHeader, ParseStats};
 
-/// Форматирует и выводит статистику парсинга
 pub fn print_results(header: &FileHeader, stats: &ParseStats) {
     println!("📄 Заголовок файла:");
     println!("   Версия формата: {:?}", header.version);
-    println!("   Кодировка: {:?}", header.encoding);
+    println!("   Кодировка (из файла): {:?}", header.encoding);
+    println!("   Кодировка (определена): {:?}", header.detected_encoding);
     println!("   Отправитель: {:?}", header.sender);
     println!("   Получатель: {:?}", header.receiver);
     println!(
@@ -24,7 +24,7 @@ pub fn print_results(header: &FileHeader, stats: &ParseStats) {
     if !stats.documents_by_type.is_empty() {
         println!("\n📋 Документы по типам:");
         let mut types: Vec<_> = stats.documents_by_type.iter().collect();
-        types.sort_by(|a, b| b.1.cmp(a.1)); // Сортировка по убыванию количества
+        types.sort_by(|a, b| b.1.cmp(a.1));
         for (doc_type, count) in types {
             println!("   • {}: {}", doc_type, count);
         }

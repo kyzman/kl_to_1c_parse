@@ -1,26 +1,37 @@
+use crate::parser::encoding::FileEncoding;
+
 /// Типы секций в файле обмена
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SectionType {
-    Header,           // Заголовок файла (1CClientBankExchange)
-    AccountStatement, // СекцияРасчСчет
-    Document(String), // СекцияДокумент=<вид_документа>
+    Header,
+    AccountStatement,
+    Document(String),
 }
 
 /// Служебная информация из заголовка файла
 #[derive(Debug, Clone, Default)]
 pub struct FileHeader {
-    pub version: Option<String>,      // ВерсияФормата
-    pub encoding: Option<String>,     // Кодировка
-    pub sender: Option<String>,       // Отправитель
-    pub receiver: Option<String>,     // Получатель
-    pub created_date: Option<String>, // ДатаСоздания
-    pub created_time: Option<String>, // ВремяСоздания
-    pub date_from: Option<String>,    // ДатаНачала
-    pub date_to: Option<String>,      // ДатаКонца
-    pub accounts: Vec<String>,        // РасчСчет (может быть несколько)
-    pub document_types: Vec<String>,  // Документ (фильтр типов)
-    /// Сырое содержимое заголовка для отладки/расширения
+    pub version: Option<String>,
+    pub encoding: Option<String>,        // Сырое значение из файла
+    pub detected_encoding: FileEncoding, // Определённая кодировка
+    pub sender: Option<String>,
+    pub receiver: Option<String>,
+    pub created_date: Option<String>,
+    pub created_time: Option<String>,
+    pub date_from: Option<String>,
+    pub date_to: Option<String>,
+    pub accounts: Vec<String>,
+    pub document_types: Vec<String>,
     pub raw_content: String,
+}
+
+impl FileHeader {
+    pub fn new() -> Self {
+        Self {
+            detected_encoding: FileEncoding::default_1c(),
+            ..Default::default()
+        }
+    }
 }
 
 /// Статистика по секциям файла
@@ -29,7 +40,6 @@ pub struct ParseStats {
     pub total_sections: u64,
     pub account_sections: u64,
     pub document_sections: u64,
-    /// Подсчёт документов по видам: "Платежное поручение" -> 42
     pub documents_by_type: std::collections::HashMap<String, u64>,
 }
 

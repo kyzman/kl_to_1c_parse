@@ -1,4 +1,4 @@
-use crate::parser::{models::*, state::*};
+use crate::parser::{encoding::*, models::*, state::*};
 use std::io::{BufRead, BufReader, Read};
 
 /// Потоковый парсер файлов 1CClientBankExchange
@@ -9,6 +9,8 @@ pub struct StreamParser<R: Read> {
     stats: ParseStats,
     header_buffer: String,
     header_finalized: bool,
+    encoding: FileEncoding,
+    raw_bytes: Vec<u8>, // Накопление байтов для перекодировки
 }
 
 impl<R: Read> StreamParser<R> {
@@ -16,27 +18,30 @@ impl<R: Read> StreamParser<R> {
         Self {
             reader: BufReader::with_capacity(64 * 1024, reader),
             state: ParserState::WaitingHeader,
-            header: FileHeader::default(),
+            header: FileHeader::new(),
             stats: ParseStats::default(),
             header_buffer: String::new(),
             header_finalized: false,
+            encoding: FileEncoding::default_1c(),
+            raw_bytes: Vec::new(),
         }
     }
 
+    /// Запускает парсинг с автоопределением кодировки
     pub fn parse(mut self) -> Result<(FileHeader, ParseStats), Box<dyn std::error::Error>> {
-        let mut line = String::new();
+        // Сначала читаем весь файл в байты для определения кодировки
+        // (для потоковой обработки больших файлов можно оптимизировать)
+        self.reader.read_to_end(&mut self.raw_bytes)?;
 
-        loop {
-            line.clear();
-            let bytes_read = self.reader.read_line(&mut line)?;
+        // Пытаемся определить кодировку из первых строк заголовка
+        self.detect_encoding_from_header()?;
 
-            if bytes_read == 0 {
-                self.state = ParserState::EndOfFile;
-                break;
-            }
+        // Конвертируем в UTF-8 для внутренней обработки
+        let content = decode_bytes(&self.raw_bytes, self.encoding);
+        let lines: Vec<&str> = content.lines().collect();
 
-            let line = line.trim_end_matches(&['\r', '\n'][..]);
-
+        // Парсим строки
+        for line in lines {
             if line.is_empty() {
                 continue;
             }
@@ -51,6 +56,41 @@ impl<R: Read> StreamParser<R> {
         self.finalize_header();
 
         Ok((self.header, self.stats))
+    }
+
+    /// Определяет кодировку из поля "Кодировка=" в заголовке
+    fn detect_encoding_from_header(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        // Пробуем распарсить первые строки в разных кодировках для поиска поля Кодировка=
+        let test_encodings = [
+            FileEncoding::Utf8,
+            FileEncoding::Windows1251,
+            FileEncoding::Cp866,
+        ];
+
+        for encoding in test_encodings {
+            let (cow, _, _) = encoding.to_encoding().decode(&self.raw_bytes);
+
+            for line in cow.lines() {
+                if let Some((key, value)) = line.split_once('=') {
+                    if key.trim() == "Кодировка" || key.trim() == "Encoding" {
+                        if let Some(detected) = FileEncoding::from_header_value(value) {
+                            self.encoding = detected;
+                            self.header.encoding = Some(value.trim().to_string());
+                            return Ok(());
+                        }
+                    }
+                }
+
+                // Останавливаемся после первой секции
+                if line.starts_with("Секция") || line.starts_with("1CClientBankExchange") {
+                    break;
+                }
+            }
+        }
+
+        // Если не нашли - используем кодировку по умолчанию
+        self.header.encoding = Some("Windows-1251 (по умолчанию)".to_string());
+        Ok(())
     }
 
     fn process_line(&mut self, line: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -100,6 +140,7 @@ impl<R: Read> StreamParser<R> {
         }
 
         self.header.raw_content = std::mem::take(&mut self.header_buffer);
+        self.header.detected_encoding = self.encoding;
         self.header_finalized = true;
 
         if self.header.version.is_none() && !self.header.raw_content.is_empty() {
@@ -107,7 +148,6 @@ impl<R: Read> StreamParser<R> {
         }
     }
 
-    /// Извлекает ключевое слово из строки
     fn extract_keyword(line: &str) -> Option<String> {
         if line.starts_with("1CClientBankExchange") {
             return Some("1CClientBankExchange".to_string());
@@ -130,7 +170,6 @@ impl<R: Read> StreamParser<R> {
         None
     }
 
-    /// Парсит одно поле заголовка вида "Ключ=Значение"
     fn parse_header_field_line(header: &mut FileHeader, line: &str) {
         if let Some((key, value)) = line.split_once('=') {
             let key = key.trim();
@@ -138,7 +177,12 @@ impl<R: Read> StreamParser<R> {
 
             match key {
                 "ВерсияФормата" => header.version = Some(value.to_string()),
-                "Кодировка" => header.encoding = Some(value.to_string()),
+                "Кодировка" => {
+                    header.encoding = Some(value.to_string());
+                    if let Some(enc) = FileEncoding::from_header_value(value) {
+                        header.detected_encoding = enc;
+                    }
+                }
                 "Отправитель" => header.sender = Some(value.to_string()),
                 "Получатель" => header.receiver = Some(value.to_string()),
                 "ДатаСоздания" => header.created_date = Some(value.to_string()),
@@ -162,6 +206,69 @@ mod tests {
     use super::*;
     use std::io::Cursor;
 
+    #[test]
+    fn test_parse_utf8_file() {
+        let sample = concat!(
+            "1CClientBankExchange\n",
+            "ВерсияФормата=1.03\n",
+            "Кодировка=UTF-8\n",
+            "СекцияДокумент=Платежное поручение\n",
+            "КонецДокумента\n",
+            "КонецФайла\n"
+        );
+        let cursor = Cursor::new(sample.as_bytes());
+        let (header, stats) = StreamParser::new(cursor).parse().unwrap();
+
+        assert_eq!(header.detected_encoding, FileEncoding::Utf8);
+        assert_eq!(stats.document_sections, 1);
+    }
+
+    #[test]
+    fn test_parse_windows1251_file() {
+        // "1CClientBankExchange\nВерсияФормата=1.03\nКодировка=Windows-1251\n" в Windows-1251
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"1CClientBankExchange\n");
+        bytes.extend_from_slice(&[
+            0xC2, 0xE5, 0xF0, 0xF1, 0xE8, 0xFF, 0xD4, 0xEE, 0xF0, 0xEC, 0xE0, 0xF2, 0xE0, 0x3D,
+            0x31, 0x2E, 0x30, 0x33, 0x0A,
+        ]); // ВерсияФормата=1.03
+        bytes.extend_from_slice(&[
+            0xCA, 0xEE, 0xE4, 0xE8, 0xF0, 0xEE, 0xB2, 0xEA, 0xE0, 0x3D, 0x57, 0x69, 0x6E, 0x64,
+            0x6F, 0x77, 0x73, 0x2D, 0x31, 0x32, 0x35, 0x31, 0x0A,
+        ]); // Кодировка=Windows-1251
+        bytes.extend_from_slice(&[
+            0xD1, 0xE5, 0xEA, 0xF6, 0xE8, 0xFF, 0xC4, 0xEE, 0xEA, 0xF3, 0xEC, 0xE5, 0xED, 0xF2,
+            0x3D, 0xCF, 0xEB, 0xE0, 0xF2, 0xE5, 0xF6, 0xED, 0xEE, 0xE5, 0x20, 0xEF, 0xEE, 0xF0,
+            0xF3, 0xF7, 0xE5, 0xED, 0xE8, 0xE5, 0x0A,
+        ]); // СекцияДокумент=Платежное поручение
+        bytes.extend_from_slice(b"\xCA, 0xEE, 0xED, 0xE5, 0xF6, 0xC4, 0xEE, 0xEA, 0xF3, 0xEC, 0xE5, 0xED, 0xF2, 0xE0, 0x0A"); // КонецДокумента
+        bytes
+            .extend_from_slice(b"\xCA, 0xEE, 0xED, 0xE5, 0xF6, 0xD4, 0xE0, 0xB9, 0xEB, 0xE0, 0x0A"); // КонецФайла
+
+        let cursor = Cursor::new(bytes);
+        let (header, stats) = StreamParser::new(cursor).parse().unwrap();
+
+        assert_eq!(header.detected_encoding, FileEncoding::Windows1251);
+        assert_eq!(stats.document_sections, 1);
+    }
+
+    #[test]
+    fn test_parse_no_encoding_specified() {
+        let sample = concat!(
+            "1CClientBankExchange\n",
+            "ВерсияФормата=1.03\n",
+            "СекцияДокумент=Тест\n",
+            "КонецДокумента\n",
+            "КонецФайла\n"
+        );
+        let cursor = Cursor::new(sample.as_bytes());
+        let (header, _) = StreamParser::new(cursor).parse().unwrap();
+
+        // По умолчанию должна быть Windows-1251
+        assert_eq!(header.detected_encoding, FileEncoding::Windows1251);
+    }
+
+    // ... остальные тесты из предыдущей версии
     #[test]
     fn test_parse_minimal_file() {
         let sample = "1CClientBankExchange\nВерсияФормата=1.03\nКонецФайла\n";
