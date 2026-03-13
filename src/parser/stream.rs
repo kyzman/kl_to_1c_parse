@@ -9,7 +9,7 @@ pub struct StreamParser<R: Read> {
     header_buffer: String,
     header_finalized: bool,
     encoding: FileEncoding,
-    pending_bytes: Option<Vec<u8>>,
+    pending_bytes: Vec<Vec<u8>>, // ⭐ Храним СЫРЫЕ БАЙТЫ строк, не декодированные строки
 }
 
 impl<R: Read> StreamParser<R> {
@@ -22,7 +22,7 @@ impl<R: Read> StreamParser<R> {
             header_buffer: String::new(),
             header_finalized: false,
             encoding: FileEncoding::default_1c(),
-            pending_bytes: None,
+            pending_bytes: Vec::new(),
         }
     }
 
@@ -31,75 +31,85 @@ impl<R: Read> StreamParser<R> {
         self.process_stream()?;
         self.finalize_header();
 
-        // ⭐ Проверка обязательных полей ПОСЛЕ обработки всех данных
-        if self.header.version.is_none() && !self.header.raw_content.is_empty() {
-            eprintln!("⚠️  Предупреждение: отсутствует поле 'ВерсияФормата'");
-        }
-
         Ok((self.header, self.stats))
     }
 
-    /// Определяет кодировку поиском =DOS, =Windows, =UTF-8 в первых байтах
+    /// ⭐ Читает ПОЛНЫЕ строки как БАЙТЫ, определяет кодировку, не декодируя заранее
     fn detect_encoding_and_buffer_bytes(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        const DETECTION_SIZE: usize = 1024;
-        let mut detection_buffer = vec![0u8; DETECTION_SIZE];
-        let mut total_read = 0;
+        const DETECTION_LINES: usize = 20;
+        let mut detection_bytes: Vec<u8> = Vec::new();
+        let mut lines_count = 0;
 
-        while total_read < DETECTION_SIZE {
-            let chunk = self.reader.fill_buf()?;
-            if chunk.is_empty() {
+        // ⭐ Читаем ПОЛНЫЕ строки как БАЙТЫ (не декодируем!)
+        while lines_count < DETECTION_LINES {
+            let mut line_bytes = Vec::new();
+            let bytes_read = self.reader.read_until(b'\n', &mut line_bytes)?;
+
+            if bytes_read == 0 {
                 break;
             }
 
-            let to_read = std::cmp::min(chunk.len(), DETECTION_SIZE - total_read);
-            detection_buffer[total_read..total_read + to_read].copy_from_slice(&chunk[..to_read]);
-            total_read += to_read;
+            // Сохраняем сырые байты для последующего декодирования
+            detection_bytes.extend_from_slice(&line_bytes);
+            self.pending_bytes.push(line_bytes.clone());
+            lines_count += 1;
 
-            let chunk_len = chunk.len();
-            self.reader.consume(to_read);
+            // ⭐ Ищем "=DOS", "=Windows", "=UTF-8" в сырых байтах (ASCII-паттерны)
+            if let Ok(line) = std::str::from_utf8(&line_bytes) {
+                let line = line.trim_end_matches(&['\r', '\n'][..]);
 
-            if to_read < chunk_len {
-                break;
+                if let Some((key, value)) = line.split_once('=') {
+                    if key.trim() == "Кодировка" || key.trim() == "Encoding" {
+                        if let Some(detected) = FileEncoding::from_standard_value(value) {
+                            self.encoding = detected;
+                            self.header.encoding = Some(value.trim().to_string());
+                            break;
+                        }
+                    }
+                }
+
+                if line.starts_with("Секция") && !line.starts_with("1CClientBankExchange") {
+                    break;
+                }
             }
         }
 
-        if total_read > 0 {
-            self.encoding =
-                FileEncoding::detect_from_bytes_standard(&detection_buffer[..total_read]);
-            self.header.detected_encoding = self.encoding;
+        // ⭐ Определяем кодировку по собранным байтам (если не нашли в поле)
+        if self.header.encoding.is_none() {
+            self.encoding = FileEncoding::detect_from_bytes_standard(&detection_bytes);
             self.header.encoding = Some(format!("{:?}", self.encoding));
-
-            // ⭐ Сохраняем байты для последующей обработки
-            self.pending_bytes = Some(detection_buffer[..total_read].to_vec());
         }
+
+        self.header.detected_encoding = self.encoding;
 
         Ok(())
     }
 
+    /// ⭐ Декодируем и обрабатываем все строки с ПРАВИЛЬНОЙ кодировкой
     fn process_stream(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        // ⭐ Сначала обрабатываем сохранённые байты
-        if let Some(bytes) = self.pending_bytes.take() {
-            // ⭐ Разбиваем на строки ДО декодирования, чтобы не потерять данные
-            let mut start = 0;
-            for (i, &byte) in bytes.iter().enumerate() {
-                if byte == b'\n' {
-                    let line_bytes = bytes[start..=i].to_vec();
-                    start = i + 1;
-                    self.process_bytes(line_bytes)?;
+        // ⭐ Сначала обрабатываем сохранённые байты с правильной кодировкой
+        let pending = std::mem::take(&mut self.pending_bytes);
+        for line_bytes in pending {
+            let (cow, _, had_errors) = self.encoding.to_encoding().decode(&line_bytes);
 
-                    if self.state == ParserState::EndOfFile {
-                        return Ok(());
-                    }
-                }
+            if had_errors {
+                eprintln!("⚠️  Предупреждение: ошибки декодирования в строке");
             }
-            // Остаток буфера (если нет завершающего \n)
-            if start < bytes.len() {
-                let line_bytes = bytes[start..].to_vec();
-                self.process_bytes(line_bytes)?;
+
+            let line = cow.trim_end_matches(&['\r', '\n'][..]);
+
+            if line.trim().is_empty() {
+                continue;
+            }
+
+            self.process_line(line)?;
+
+            if self.state == ParserState::EndOfFile {
+                return Ok(());
             }
         }
 
-        // ⭐ Читаем остальной файл построчно
+        // ⭐ Читаем остальной файл ПОЛНЫМИ строками
         loop {
             let mut line_bytes = Vec::new();
             let bytes_read = self.reader.read_until(b'\n', &mut line_bytes)?;
@@ -107,7 +117,20 @@ impl<R: Read> StreamParser<R> {
             if bytes_read == 0 {
                 break;
             }
-            self.process_bytes(line_bytes)?;
+
+            let (cow, _, had_errors) = self.encoding.to_encoding().decode(&line_bytes);
+
+            if had_errors {
+                eprintln!("⚠️  Предупреждение: ошибки декодирования в строке");
+            }
+
+            let line = cow.trim_end_matches(&['\r', '\n'][..]);
+
+            if line.trim().is_empty() {
+                continue;
+            }
+
+            self.process_line(line)?;
 
             if self.state == ParserState::EndOfFile {
                 break;
@@ -117,31 +140,11 @@ impl<R: Read> StreamParser<R> {
         Ok(())
     }
 
-    fn process_bytes(&mut self, bytes: Vec<u8>) -> Result<(), Box<dyn std::error::Error>> {
-        // ⭐ Декодируем с учётом кодировки
-        let (cow, _, had_errors) = self.encoding.to_encoding().decode(&bytes);
-
-        if had_errors {
-            // Не прерываем обработку, но логируем
-            eprintln!("⚠️  Предупреждение: ошибки декодирования в строке {}", cow);
-        }
-
-        let line = cow.trim_end_matches(&['\r', '\n'][..]);
-
-        if line.is_empty() {
-            return Ok(());
-        }
-
-        self.process_line(line)
-    }
-
     fn process_line(&mut self, line: &str) -> Result<(), Box<dyn std::error::Error>> {
-        // ⭐ Сначала проверяем ключевые слова
         if let Some(keyword) = Self::extract_keyword(line) {
             let old_state = self.state.clone();
             let (new_state, section_type) = self.state.transition(&keyword);
 
-            // ⭐ Финализируем заголовок при выходе из ReadingHeader
             if matches!(old_state, ParserState::ReadingHeader)
                 && !matches!(new_state, ParserState::ReadingHeader)
                 && !self.header_finalized
@@ -149,7 +152,6 @@ impl<R: Read> StreamParser<R> {
                 self.finalize_header();
             }
 
-            // ⭐ Обновляем статистику
             if let Some(section) = &section_type {
                 self.stats.total_sections += 1;
                 match section {
@@ -160,13 +162,11 @@ impl<R: Read> StreamParser<R> {
             }
             self.state = new_state;
         } else {
-            // ⭐ Обычная строка данных — парсим поля заголовка
             if matches!(self.state, ParserState::ReadingHeader) {
                 self.header_buffer.push_str(line);
                 self.header_buffer.push('\n');
                 Self::parse_header_field_line(&mut self.header, line);
             }
-            // Строки внутри секций можно обрабатывать при расширении функционала
         }
         Ok(())
     }
@@ -178,7 +178,6 @@ impl<R: Read> StreamParser<R> {
         self.header.raw_content = std::mem::take(&mut self.header_buffer);
         self.header.detected_encoding = self.encoding;
         self.header_finalized = true;
-        // ⭐ Убрали проверку version отсюда — перенесена в parse()
     }
 
     fn extract_keyword(line: &str) -> Option<String> {
@@ -287,7 +286,7 @@ mod tests {
             "1CClientBankExchange\n",
             "ВерсияФормата=1.03\n",
             "Кодировка=UTF-8\n",
-            "СекцияДокумент=Платежное\n",
+            "СекцияДокумент=Платежное поручение\n",
             "КонецДокумента\n",
             "КонецФайла\n"
         );
@@ -304,14 +303,14 @@ mod tests {
         sample.extend_from_slice(&[
             0xC2, 0xE5, 0xF0, 0xF1, 0xE8, 0xFF, 0xD4, 0xEE, 0xF0, 0xEC, 0xE0, 0xF2, 0xE0, 0x3D,
             0x31, 0x2E, 0x30, 0x33, 0x0A,
-        ]); // ВерсияФормата=1.03
+        ]);
         sample.extend_from_slice(&[
             0xCA, 0xEE, 0xE4, 0xE8, 0xF0, 0xEE, 0xB2, 0xEA, 0xE0, 0x3D, 0x57, 0x69, 0x6E, 0x64,
             0x6F, 0x77, 0x73, 0x0A,
-        ]); // Кодировка=Windows
+        ]);
         sample.extend_from_slice(&[
             0xCA, 0xEE, 0xED, 0xE5, 0xF6, 0xD4, 0xE0, 0xB9, 0xEB, 0xE0, 0x0A,
-        ]); // КонецФайла
+        ]);
 
         let cursor = Cursor::new(sample);
         let (header, stats) = StreamParser::new(cursor).parse().unwrap();
