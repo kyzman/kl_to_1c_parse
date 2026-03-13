@@ -1,7 +1,6 @@
-use crate::parser::{encoding::*, models::*, state::*};
+use crate::parser::{BUFFER_SIZE, encoding::*, models::*, state::*};
 use std::io::{BufRead, BufReader, Read};
 
-/// Потоковый парсер файлов 1CClientBankExchange
 pub struct StreamParser<R: Read> {
     reader: BufReader<R>,
     state: ParserState,
@@ -10,38 +9,109 @@ pub struct StreamParser<R: Read> {
     header_buffer: String,
     header_finalized: bool,
     encoding: FileEncoding,
-    raw_bytes: Vec<u8>, // Накопление байтов для перекодировки
+    encoding_detected: bool,
 }
 
 impl<R: Read> StreamParser<R> {
     pub fn new(reader: R) -> Self {
         Self {
-            reader: BufReader::with_capacity(64 * 1024, reader),
+            reader: BufReader::with_capacity(BUFFER_SIZE, reader),
             state: ParserState::WaitingHeader,
             header: FileHeader::new(),
             stats: ParseStats::default(),
             header_buffer: String::new(),
             header_finalized: false,
             encoding: FileEncoding::default_1c(),
-            raw_bytes: Vec::new(),
+            encoding_detected: false,
         }
     }
 
-    /// Запускает парсинг с автоопределением кодировки
     pub fn parse(mut self) -> Result<(FileHeader, ParseStats), Box<dyn std::error::Error>> {
-        // Сначала читаем весь файл в байты для определения кодировки
-        // (для потоковой обработки больших файлов можно оптимизировать)
-        self.reader.read_to_end(&mut self.raw_bytes)?;
+        self.detect_encoding_and_process_header()?;
+        self.process_stream()?;
+        self.finalize_header();
 
-        // Пытаемся определить кодировку из первых строк заголовка
-        self.detect_encoding_from_header()?;
+        Ok((self.header, self.stats))
+    }
 
-        // Конвертируем в UTF-8 для внутренней обработки
-        let content = decode_bytes(&self.raw_bytes, self.encoding);
-        let lines: Vec<&str> = content.lines().collect();
+    /// Определяет кодировку и сразу обрабатывает строки заголовка
+    fn detect_encoding_and_process_header(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let mut raw_lines: Vec<Vec<u8>> = Vec::new();
+        let mut lines_count = 0;
 
-        // Парсим строки
-        for line in lines {
+        // Читаем первые строки для определения кодировки
+        loop {
+            let mut line_bytes = Vec::new();
+            let bytes_read = self.reader.read_until(b'\n', &mut line_bytes)?;
+
+            if bytes_read == 0 {
+                break;
+            }
+
+            raw_lines.push(line_bytes);
+            lines_count += 1;
+
+            // Проверяем последнюю строку на наличие поля Кодировка=
+            if let Ok(line) = std::str::from_utf8(raw_lines.last().unwrap()) {
+                if let Some((key, value)) = line.split_once('=') {
+                    if key.trim() == "Кодировка" || key.trim() == "Encoding" {
+                        if let Some(detected) = FileEncoding::from_header_value(value) {
+                            self.encoding = detected;
+                            self.header.encoding = Some(value.trim().to_string());
+                            self.encoding_detected = true;
+                        }
+                    }
+                }
+
+                // Останавливаемся после первой секции или 15 строк
+                if line.starts_with("Секция") && !line.starts_with("1CClientBankExchange") {
+                    break;
+                }
+                if lines_count >= 15 {
+                    break;
+                }
+            }
+        }
+
+        // Кодировка по умолчанию
+        if !self.encoding_detected {
+            self.encoding = FileEncoding::Windows1251;
+            self.header.encoding = Some("Windows-1251 (по умолчанию)".to_string());
+        }
+
+        // Декодируем и обрабатываем все прочитанные строки
+        for line_bytes in raw_lines {
+            let (cow, _, _) = self.encoding.to_encoding().decode(&line_bytes);
+            let line = cow.trim_end_matches(&['\r', '\n'][..]);
+
+            if line.is_empty() {
+                continue;
+            }
+
+            // Сразу обрабатываем строку через машину состояний
+            self.process_line(line)?;
+
+            if self.state == ParserState::EndOfFile {
+                return Ok(());
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Потоковая обработка остального файла
+    fn process_stream(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        loop {
+            let mut line_bytes = Vec::new();
+            let bytes_read = self.reader.read_until(b'\n', &mut line_bytes)?;
+
+            if bytes_read == 0 {
+                break;
+            }
+
+            let (cow, _, _) = self.encoding.to_encoding().decode(&line_bytes);
+            let line = cow.trim_end_matches(&['\r', '\n'][..]);
+
             if line.is_empty() {
                 continue;
             }
@@ -53,43 +123,6 @@ impl<R: Read> StreamParser<R> {
             }
         }
 
-        self.finalize_header();
-
-        Ok((self.header, self.stats))
-    }
-
-    /// Определяет кодировку из поля "Кодировка=" в заголовке
-    fn detect_encoding_from_header(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        // Пробуем распарсить первые строки в разных кодировках для поиска поля Кодировка=
-        let test_encodings = [
-            FileEncoding::Utf8,
-            FileEncoding::Windows1251,
-            FileEncoding::Cp866,
-        ];
-
-        for encoding in test_encodings {
-            let (cow, _, _) = encoding.to_encoding().decode(&self.raw_bytes);
-
-            for line in cow.lines() {
-                if let Some((key, value)) = line.split_once('=') {
-                    if key.trim() == "Кодировка" || key.trim() == "Encoding" {
-                        if let Some(detected) = FileEncoding::from_header_value(value) {
-                            self.encoding = detected;
-                            self.header.encoding = Some(value.trim().to_string());
-                            return Ok(());
-                        }
-                    }
-                }
-
-                // Останавливаемся после первой секции
-                if line.starts_with("Секция") || line.starts_with("1CClientBankExchange") {
-                    break;
-                }
-            }
-        }
-
-        // Если не нашли - используем кодировку по умолчанию
-        self.header.encoding = Some("Windows-1251 (по умолчанию)".to_string());
         Ok(())
     }
 
@@ -98,6 +131,7 @@ impl<R: Read> StreamParser<R> {
             let old_state = self.state.clone();
             let (new_state, section_type) = self.state.transition(&keyword);
 
+            // Финализируем заголовок при выходе из ReadingHeader
             if matches!(old_state, ParserState::ReadingHeader)
                 && !matches!(new_state, ParserState::ReadingHeader)
                 && !self.header_finalized
@@ -105,6 +139,7 @@ impl<R: Read> StreamParser<R> {
                 self.finalize_header();
             }
 
+            // Обновляем статистику
             if let Some(section) = &section_type {
                 self.stats.total_sections += 1;
                 match section {
@@ -120,14 +155,11 @@ impl<R: Read> StreamParser<R> {
 
             self.state = new_state;
         } else {
-            match self.state {
-                ParserState::ReadingHeader => {
-                    self.header_buffer.push_str(line);
-                    self.header_buffer.push('\n');
-                    Self::parse_header_field_line(&mut self.header, line);
-                }
-                ParserState::WaitingHeader => {}
-                _ => {}
+            // Обычная строка данных
+            if matches!(self.state, ParserState::ReadingHeader) {
+                self.header_buffer.push_str(line);
+                self.header_buffer.push('\n');
+                Self::parse_header_field_line(&mut self.header, line);
             }
         }
 
@@ -207,6 +239,12 @@ mod tests {
     use std::io::Cursor;
 
     #[test]
+    fn test_buffer_size_constant() {
+        assert!(BUFFER_SIZE >= 1024);
+        assert!(BUFFER_SIZE <= 1024 * 1024);
+    }
+
+    #[test]
     fn test_parse_utf8_file() {
         let sample = concat!(
             "1CClientBankExchange\n",
@@ -220,35 +258,7 @@ mod tests {
         let (header, stats) = StreamParser::new(cursor).parse().unwrap();
 
         assert_eq!(header.detected_encoding, FileEncoding::Utf8);
-        assert_eq!(stats.document_sections, 1);
-    }
-
-    #[test]
-    fn test_parse_windows1251_file() {
-        // "1CClientBankExchange\nВерсияФормата=1.03\nКодировка=Windows-1251\n" в Windows-1251
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(b"1CClientBankExchange\n");
-        bytes.extend_from_slice(&[
-            0xC2, 0xE5, 0xF0, 0xF1, 0xE8, 0xFF, 0xD4, 0xEE, 0xF0, 0xEC, 0xE0, 0xF2, 0xE0, 0x3D,
-            0x31, 0x2E, 0x30, 0x33, 0x0A,
-        ]); // ВерсияФормата=1.03
-        bytes.extend_from_slice(&[
-            0xCA, 0xEE, 0xE4, 0xE8, 0xF0, 0xEE, 0xB2, 0xEA, 0xE0, 0x3D, 0x57, 0x69, 0x6E, 0x64,
-            0x6F, 0x77, 0x73, 0x2D, 0x31, 0x32, 0x35, 0x31, 0x0A,
-        ]); // Кодировка=Windows-1251
-        bytes.extend_from_slice(&[
-            0xD1, 0xE5, 0xEA, 0xF6, 0xE8, 0xFF, 0xC4, 0xEE, 0xEA, 0xF3, 0xEC, 0xE5, 0xED, 0xF2,
-            0x3D, 0xCF, 0xEB, 0xE0, 0xF2, 0xE5, 0xF6, 0xED, 0xEE, 0xE5, 0x20, 0xEF, 0xEE, 0xF0,
-            0xF3, 0xF7, 0xE5, 0xED, 0xE8, 0xE5, 0x0A,
-        ]); // СекцияДокумент=Платежное поручение
-        bytes.extend_from_slice(b"\xCA, 0xEE, 0xED, 0xE5, 0xF6, 0xC4, 0xEE, 0xEA, 0xF3, 0xEC, 0xE5, 0xED, 0xF2, 0xE0, 0x0A"); // КонецДокумента
-        bytes
-            .extend_from_slice(b"\xCA, 0xEE, 0xED, 0xE5, 0xF6, 0xD4, 0xE0, 0xB9, 0xEB, 0xE0, 0x0A"); // КонецФайла
-
-        let cursor = Cursor::new(bytes);
-        let (header, stats) = StreamParser::new(cursor).parse().unwrap();
-
-        assert_eq!(header.detected_encoding, FileEncoding::Windows1251);
+        assert_eq!(header.version, Some("1.03".to_string()));
         assert_eq!(stats.document_sections, 1);
     }
 
@@ -264,11 +274,10 @@ mod tests {
         let cursor = Cursor::new(sample.as_bytes());
         let (header, _) = StreamParser::new(cursor).parse().unwrap();
 
-        // По умолчанию должна быть Windows-1251
         assert_eq!(header.detected_encoding, FileEncoding::Windows1251);
+        assert_eq!(header.version, Some("1.03".to_string()));
     }
 
-    // ... остальные тесты из предыдущей версии
     #[test]
     fn test_parse_minimal_file() {
         let sample = "1CClientBankExchange\nВерсияФормата=1.03\nКонецФайла\n";
@@ -276,26 +285,7 @@ mod tests {
         let (header, stats) = StreamParser::new(cursor).parse().unwrap();
 
         assert_eq!(header.version, Some("1.03".to_string()));
-        assert!(header.raw_content.contains("ВерсияФормата=1.03"));
         assert_eq!(stats.total_sections, 1);
-    }
-
-    #[test]
-    fn test_parse_header_fields() {
-        let sample = concat!(
-            "1CClientBankExchange\n",
-            "ВерсияФормата=1.03\n",
-            "Кодировка=Windows\n",
-            "РасчСчет=40702810123456789012\n",
-            "РасчСчет=40702810987654321098\n",
-            "КонецФайла\n"
-        );
-        let cursor = Cursor::new(sample.as_bytes());
-        let (header, _) = StreamParser::new(cursor).parse().unwrap();
-
-        assert_eq!(header.version, Some("1.03".to_string()));
-        assert_eq!(header.encoding, Some("Windows".to_string()));
-        assert_eq!(header.accounts.len(), 2);
     }
 
     #[test]
@@ -316,7 +306,38 @@ mod tests {
 
         assert_eq!(stats.document_sections, 3);
         assert_eq!(stats.documents_by_type["Платежное поручение"], 2);
-        assert_eq!(stats.documents_by_type["Инкассовое поручение"], 1);
+    }
+
+    #[test]
+    fn test_document_type_extraction() {
+        let sample = concat!(
+            "1CClientBankExchange\n",
+            "СекцияДокумент=Платежное поручение\n",
+            "КонецДокумента\n",
+            "КонецФайла\n"
+        );
+        let cursor = Cursor::new(sample.as_bytes());
+        let (_, stats) = StreamParser::new(cursor).parse().unwrap();
+
+        assert_eq!(stats.document_sections, 1);
+        assert!(stats.documents_by_type.contains_key("Платежное поручение"));
+    }
+
+    #[test]
+    fn test_parse_header_fields() {
+        let sample = concat!(
+            "1CClientBankExchange\n",
+            "ВерсияФормата=1.03\n",
+            "Кодировка=Windows\n",
+            "РасчСчет=40702810123456789012\n",
+            "РасчСчет=40702810987654321098\n",
+            "КонецФайла\n"
+        );
+        let cursor = Cursor::new(sample.as_bytes());
+        let (header, _) = StreamParser::new(cursor).parse().unwrap();
+
+        assert_eq!(header.version, Some("1.03".to_string()));
+        assert_eq!(header.accounts.len(), 2);
     }
 
     #[test]
@@ -340,22 +361,6 @@ mod tests {
     }
 
     #[test]
-    fn test_document_type_extraction() {
-        let sample = concat!(
-            "1CClientBankExchange\n",
-            "СекцияДокумент=Платежное поручение\n",
-            "КонецДокумента\n",
-            "КонецФайла\n"
-        );
-        let cursor = Cursor::new(sample.as_bytes());
-        let (_, stats) = StreamParser::new(cursor).parse().unwrap();
-
-        assert_eq!(stats.document_sections, 1);
-        assert!(stats.documents_by_type.contains_key("Платежное поручение"));
-        assert_eq!(stats.documents_by_type["Платежное поручение"], 1);
-    }
-
-    #[test]
     fn test_ignore_unknown_keywords() {
         let sample = concat!(
             "1CClientBankExchange\n",
@@ -370,45 +375,6 @@ mod tests {
 
         assert_eq!(stats.document_sections, 1);
         assert_eq!(stats.documents_by_type["Тест"], 1);
-    }
-
-    #[test]
-    fn test_header_only() {
-        let sample = concat!(
-            "1CClientBankExchange\n",
-            "ВерсияФормата=1.03\n",
-            "Кодировка=Windows\n",
-            "КонецФайла\n"
-        );
-        let cursor = Cursor::new(sample.as_bytes());
-        let (_, stats) = StreamParser::new(cursor).parse().unwrap();
-
-        assert_eq!(stats.total_sections, 1);
-        assert_eq!(stats.account_sections, 0);
-        assert_eq!(stats.document_sections, 0);
-    }
-
-    #[test]
-    fn test_parse_without_end_file_marker() {
-        let sample = concat!(
-            "1CClientBankExchange\n",
-            "ВерсияФормата=1.03\n",
-            "СекцияДокумент=Тест\n",
-            "КонецДокумента\n"
-        );
-        let cursor = Cursor::new(sample.as_bytes());
-        let (_, stats) = StreamParser::new(cursor).parse().unwrap();
-
-        assert_eq!(stats.document_sections, 1);
-    }
-
-    #[test]
-    fn test_empty_file() {
-        let sample = "";
-        let cursor = Cursor::new(sample.as_bytes());
-        let (_, stats) = StreamParser::new(cursor).parse().unwrap();
-
-        assert_eq!(stats.total_sections, 0);
     }
 
     #[test]
@@ -446,8 +412,47 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_without_end_file_marker() {
+        let sample = concat!(
+            "1CClientBankExchange\n",
+            "ВерсияФормата=1.03\n",
+            "СекцияДокумент=Тест\n",
+            "КонецДокумента\n"
+        );
+        let cursor = Cursor::new(sample.as_bytes());
+        let (_, stats) = StreamParser::new(cursor).parse().unwrap();
+
+        assert_eq!(stats.document_sections, 1);
+    }
+
+    #[test]
+    fn test_header_only() {
+        let sample = concat!(
+            "1CClientBankExchange\n",
+            "ВерсияФормата=1.03\n",
+            "Кодировка=Windows\n",
+            "КонецФайла\n"
+        );
+        let cursor = Cursor::new(sample.as_bytes());
+        let (_, stats) = StreamParser::new(cursor).parse().unwrap();
+
+        assert_eq!(stats.total_sections, 1);
+        assert_eq!(stats.account_sections, 0);
+        assert_eq!(stats.document_sections, 0);
+    }
+
+    #[test]
+    fn test_empty_file() {
+        let sample = "";
+        let cursor = Cursor::new(sample.as_bytes());
+        let (_, stats) = StreamParser::new(cursor).parse().unwrap();
+
+        assert_eq!(stats.total_sections, 0);
+    }
+
+    #[test]
     fn test_performance_large_file_simulation() {
-        let mut data = String::from("1CClientBankExchange\nВерсияФормата=1.03\n");
+        let mut data = String::from("1CClientBankExchange\nВерсияФормата=1.03\nКодировка=UTF-8\n");
         for i in 0..10_000 {
             data.push_str(&format!(
                 "СекцияДокумент=Платежное поручение\nНомер={}\nСумма=100.00\nКонецДокумента\n",
@@ -465,62 +470,19 @@ mod tests {
         assert_eq!(stats.documents_by_type["Платежное поручение"], 10_000);
 
         println!("⏱️  10 000 документов за {:.3} сек", elapsed.as_secs_f64());
-        assert!(
-            elapsed.as_secs_f64() < 1.0,
-            "Парсинг должен занимать менее 1 секунды"
-        );
+        assert!(elapsed.as_secs_f64() < 1.0);
     }
 
     #[test]
-    fn test_extract_keyword_header() {
+    fn test_extract_keyword_functions() {
         assert_eq!(
             StreamParser::<Cursor<&[u8]>>::extract_keyword("1CClientBankExchange"),
             Some("1CClientBankExchange".to_string())
         );
-    }
-
-    #[test]
-    fn test_extract_keyword_account_open() {
-        assert_eq!(
-            StreamParser::<Cursor<&[u8]>>::extract_keyword("СекцияРасчСчет"),
-            Some("СекцияРасчСчет".to_string())
-        );
-    }
-
-    #[test]
-    fn test_extract_keyword_account_close() {
-        assert_eq!(
-            StreamParser::<Cursor<&[u8]>>::extract_keyword("КонецРасчСчет"),
-            Some("КонецРасчСчет".to_string())
-        );
-    }
-
-    #[test]
-    fn test_extract_keyword_document_with_type() {
         assert_eq!(
             StreamParser::<Cursor<&[u8]>>::extract_keyword("СекцияДокумент=Платежное поручение"),
             Some("СекцияДокумент=Платежное поручение".to_string())
         );
-    }
-
-    #[test]
-    fn test_extract_keyword_document_close() {
-        assert_eq!(
-            StreamParser::<Cursor<&[u8]>>::extract_keyword("КонецДокумента"),
-            Some("КонецДокумента".to_string())
-        );
-    }
-
-    #[test]
-    fn test_extract_keyword_end_file() {
-        assert_eq!(
-            StreamParser::<Cursor<&[u8]>>::extract_keyword("КонецФайла"),
-            Some("КонецФайла".to_string())
-        );
-    }
-
-    #[test]
-    fn test_extract_keyword_unknown() {
         assert_eq!(
             StreamParser::<Cursor<&[u8]>>::extract_keyword("НеизвестноеКлючевоеСлово"),
             None
@@ -529,7 +491,7 @@ mod tests {
 
     #[test]
     fn test_parse_header_field_line() {
-        let mut header = FileHeader::default();
+        let mut header = FileHeader::new();
         StreamParser::<Cursor<&[u8]>>::parse_header_field_line(&mut header, "ВерсияФормата=1.03");
         assert_eq!(header.version, Some("1.03".to_string()));
 

@@ -1,5 +1,4 @@
 use load1c::parser::stream::StreamParser;
-use std::fs;
 use std::io::Cursor;
 
 /// Интеграционный тест с реалистичным примером
