@@ -53,15 +53,6 @@ impl<R: Read> StreamParser<R> {
             detection_bytes.extend_from_slice(&line_bytes);
             self.pending_bytes.push(line_bytes.clone());
             lines_count += 1;
-
-            // ⭐ Ищем "=DOS", "=Windows", "=UTF-8" в сырых байтах (ASCII-паттерны)
-            if let Ok(line) = std::str::from_utf8(&line_bytes) {
-                let line = line.trim_end_matches(&['\r', '\n'][..]);
-
-                if line.starts_with("Секция") && !line.starts_with("1CClientBankExchange") {
-                    break;
-                }
-            }
         }
 
         // ⭐ Определяем кодировку по собранным байтам (если не нашли в поле)
@@ -77,50 +68,28 @@ impl<R: Read> StreamParser<R> {
 
     /// ⭐ Декодируем и обрабатываем все строки с ПРАВИЛЬНОЙ кодировкой
     fn process_stream(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        // ⭐ Сначала обрабатываем сохранённые байты с правильной кодировкой
+        // ⭐ Один буфер на все строки
+        let mut line_bytes = Vec::with_capacity(1024);
+
+        // Обрабатываем pending_bytes
         let pending = std::mem::take(&mut self.pending_bytes);
-        for line_bytes in pending {
-            let (cow, _, had_errors) = self.encoding.to_encoding().decode(&line_bytes);
-
-            if had_errors {
-                eprintln!("⚠️  Предупреждение: ошибки декодирования в строке");
-            }
-
-            let line = cow.trim_end_matches(&['\r', '\n'][..]);
-
-            if line.trim().is_empty() {
-                continue;
-            }
-
-            self.process_line(line)?;
-
+        for pending_line in pending {
+            self.process_line_bytes(&pending_line)?;
             if self.state == ParserState::EndOfFile {
                 return Ok(());
             }
         }
 
-        // ⭐ Читаем остальной файл ПОЛНЫМИ строками
+        // Читаем остальной файл
         loop {
-            let mut line_bytes = Vec::new();
+            line_bytes.clear(); // ⭐ Переиспользуем буфер!
             let bytes_read = self.reader.read_until(b'\n', &mut line_bytes)?;
 
             if bytes_read == 0 {
                 break;
             }
 
-            let (cow, _, had_errors) = self.encoding.to_encoding().decode(&line_bytes);
-
-            if had_errors {
-                eprintln!("⚠️  Предупреждение: ошибки декодирования в строке");
-            }
-
-            let line = cow.trim_end_matches(&['\r', '\n'][..]);
-
-            if line.trim().is_empty() {
-                continue;
-            }
-
-            self.process_line(line)?;
+            self.process_line_bytes(&line_bytes)?;
 
             if self.state == ParserState::EndOfFile {
                 break;
@@ -128,6 +97,22 @@ impl<R: Read> StreamParser<R> {
         }
 
         Ok(())
+    }
+
+    fn process_line_bytes(&mut self, bytes: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
+        let (cow, _, had_errors) = self.encoding.to_encoding().decode(bytes);
+
+        if had_errors {
+            eprintln!("⚠️  Предупреждение: ошибки декодирования в строке");
+        }
+
+        let line = cow.trim_end_matches(&['\r', '\n'][..]);
+
+        if line.trim().is_empty() {
+            return Ok(());
+        }
+
+        self.process_line(line)
     }
 
     fn process_line(&mut self, line: &str) -> Result<(), Box<dyn std::error::Error>> {
