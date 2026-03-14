@@ -45,9 +45,7 @@ impl FileEncoding {
         for i in 0..bytes.len().saturating_sub(3) {
             if bytes[i] == b'='
                 && i + 3 < bytes.len()
-                && bytes[i + 1] == b'D'
-                && bytes[i + 2] == b'O'
-                && bytes[i + 3] == b'S'
+                && bytes[i + 1..i + 4].eq_ignore_ascii_case(b"dos")
             {
                 let after = i + 4;
                 if after >= bytes.len()
@@ -65,13 +63,7 @@ impl FileEncoding {
         for i in 0..bytes.len().saturating_sub(7) {
             if bytes[i] == b'='
                 && i + 7 < bytes.len()
-                && bytes[i + 1] == b'W'
-                && bytes[i + 2] == b'i'
-                && bytes[i + 3] == b'n'
-                && bytes[i + 4] == b'd'
-                && bytes[i + 5] == b'o'
-                && bytes[i + 6] == b'w'
-                && bytes[i + 7] == b's'
+                && bytes[i + 1..i + 8].eq_ignore_ascii_case(b"windows")
             {
                 let after = i + 8;
                 if after >= bytes.len()
@@ -89,20 +81,13 @@ impl FileEncoding {
         for i in 0..bytes.len().saturating_sub(5) {
             if bytes[i] == b'='
                 && i + 5 < bytes.len()
-                && bytes[i + 1] == b'U'
-                && bytes[i + 2] == b'T'
-                && bytes[i + 3] == b'F'
-                && bytes[i + 4] == b'-'
-                && bytes[i + 5] == b'8'
+                && bytes[i + 1..i + 6].eq_ignore_ascii_case(b"utf-8")
             {
                 return FileEncoding::Utf8;
             }
             if i + 4 < bytes.len()
                 && bytes[i] == b'='
-                && bytes[i + 1] == b'u'
-                && bytes[i + 2] == b't'
-                && bytes[i + 3] == b'f'
-                && bytes[i + 4] == b'8'
+                && bytes[i + 1..i + 5].eq_ignore_ascii_case(b"utf8")
             {
                 return FileEncoding::Utf8;
             }
@@ -155,19 +140,15 @@ mod tests {
 
     #[test]
     fn test_detect_from_bytes_with_dos() {
-        let mut bytes = b"1CClientBankExchange\n".to_vec();
-        bytes.extend_from_slice(&[0xCB, 0xEF, 0xE4, 0xE8, 0xF0, 0xEF, 0xB2, 0xEA, 0xE0]); // Кодировка (CP-866)
-        bytes.extend_from_slice(b"=DOS\n");
-        let detected = FileEncoding::detect_from_bytes_standard(&bytes);
+        let bytes = b"1CClientBankExchange\n\xCB\xEF\xE4\xE8\xF0\xEF\xB2\xEA\xE0=DOS\n"; // Кодировка (CP-866)
+        let detected = FileEncoding::detect_from_bytes_standard(bytes);
         assert_eq!(detected, FileEncoding::Cp866);
     }
 
     #[test]
     fn test_detect_from_bytes_with_windows() {
-        let mut bytes = b"1CClientBankExchange\n".to_vec();
-        bytes.extend_from_slice(&[0xCA, 0xEE, 0xE4, 0xE8, 0xF0, 0xEE, 0xB2, 0xEA, 0xE0]); // Кодировка (Windows-1251)
-        bytes.extend_from_slice(b"=Windows\n");
-        let detected = FileEncoding::detect_from_bytes_standard(&bytes);
+        let bytes = b"1CClientBankExchange\n\xC2\xE5\xF0\xF1\xE8\xFF\xD4\xEE\xF0\xEC\xE0\xF2\xE0=1.03\n\xCA\xEE\xE4\xE8\xF0\xEE\xB2\xEA\xE0=Windows\n"; // Кодировка (Windows-1251)
+        let detected = FileEncoding::detect_from_bytes_standard(bytes);
         assert_eq!(detected, FileEncoding::Windows1251);
     }
 

@@ -43,7 +43,7 @@ impl<R: Read> StreamParser<R> {
         // ⭐ Читаем ПОЛНЫЕ строки как БАЙТЫ (не декодируем!)
         while lines_count < DETECTION_LINES {
             let mut line_bytes = Vec::new();
-            let bytes_read = self.reader.read_until(b'\n', &mut line_bytes)?;
+            let bytes_read = self.reader.read_until(b'\n', &mut line_bytes)?; // TODO проверить, возможно read_line будет эффективнее?
 
             if bytes_read == 0 {
                 break;
@@ -58,6 +58,7 @@ impl<R: Read> StreamParser<R> {
             if let Ok(line) = std::str::from_utf8(&line_bytes) {
                 let line = line.trim_end_matches(&['\r', '\n'][..]);
 
+                // TODO Проверить на полезность. У нас кодировка проверяется в любом случае другим образом.
                 if let Some((key, value)) = line.split_once('=') {
                     if key.trim() == "Кодировка" || key.trim() == "Encoding" {
                         if let Some(detected) = FileEncoding::from_standard_value(value) {
@@ -208,17 +209,7 @@ impl<R: Read> StreamParser<R> {
             let value = value.trim();
             match key {
                 "ВерсияФормата" => header.version = Some(value.to_string()),
-                "Кодировка" => {
-                    header.encoding = Some(value.to_string());
-                    if let Some(enc) = FileEncoding::from_standard_value(value) {
-                        if enc != header.detected_encoding {
-                            eprintln!(
-                                "⚠️  Предупреждение: кодировка в файле ({:?}) не совпадает с определённой ({:?})",
-                                enc, header.detected_encoding
-                            );
-                        }
-                    }
-                }
+                "Кодировка" => header.encoding = Some(value.to_string()), // кодировка в любом случае уже должна быть определена, поэтому без вариантов
                 "Отправитель" => header.sender = Some(value.to_string()),
                 "Получатель" => header.receiver = Some(value.to_string()),
                 "ДатаСоздания" => header.created_date = Some(value.to_string()),
