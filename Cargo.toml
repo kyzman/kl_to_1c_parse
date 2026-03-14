@@ -1,6 +1,6 @@
 [package]
 name = "load1c"
-version = "0.1.5"
+version = "0.1.6"
 edition = "2024"
 authors = ["Andrew"]
 description = "High-performance parser for 1CClientBankExchange format"
@@ -11,11 +11,13 @@ description = "High-performance parser for 1CClientBankExchange format"
 # postgres = { version = "0.19", optional = true }
 # tokio = { version = "1", features = ["full"], optional = true }
 encoding_rs = "0.8"  # Поддержка Windows-1251, CP-866 и др.
+indicatif = { version = "0.17", optional = true }  # ⭐ НОВОЕ
 
 [features]
 default = ["line-limit-error"]
 line-limit-error = []    # Завершать программу при превышении
 line-limit-truncate = [] # Обрезать строку при превышении
+progress-bar = ["dep:indicatif"]  # ⭐ НОВОЕ: прогресс-бар обработки
 
 [[bin]]
 name = "load1c"

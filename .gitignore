@@ -1,4 +1,2 @@
 /target
-tests/fixtures/large.txt
-tests/fixtures/sample_exchange.txt
-tests/fixtures/small.txt
+tests/fixtures

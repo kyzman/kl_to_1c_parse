@@ -1,6 +1,8 @@
 use crate::parser::{
     BUFFER_SIZE, LINE_LENGTH_STRICT, MAX_LINE_LENGTH, encoding::*, models::*, state::*,
 };
+#[cfg(feature = "progress-bar")]
+use indicatif::{ProgressBar, ProgressStyle};
 use std::io::{BufRead, BufReader, Read};
 
 /// ⭐ Ошибка превышения длины строки
@@ -33,6 +35,9 @@ pub struct StreamParser<R: Read> {
     encoding: FileEncoding,
     pending_bytes: Vec<Vec<u8>>,
     line_number: u64,
+    file_size: u64, // ⭐ НОВОЕ: общий размер файла
+    #[cfg(feature = "progress-bar")]
+    progress_bar: Option<ProgressBar>, // ⭐ НОВОЕ: прогресс-бар
 }
 
 impl<R: Read> StreamParser<R> {
@@ -47,13 +52,44 @@ impl<R: Read> StreamParser<R> {
             encoding: FileEncoding::default_1c(),
             pending_bytes: Vec::new(),
             line_number: 0,
+            file_size: 0,
+            #[cfg(feature = "progress-bar")]
+            progress_bar: None,
         }
+    }
+
+    /// ⭐ НОВОЕ: Создание парсера с известным размером файла (для прогресс-бара)
+    pub fn with_file_size(reader: R, file_size: u64) -> Self {
+        let mut parser = Self::new(reader);
+        parser.file_size = file_size;
+
+        #[cfg(feature = "progress-bar")]
+        {
+            use indicatif::ProgressStyle;
+            let pb = ProgressBar::new(file_size);
+            pb.set_style(
+                ProgressStyle::default_bar()
+                    .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})")
+                    .unwrap()
+                    .progress_chars("=>-"),
+            );
+            parser.progress_bar = Some(pb);
+        }
+
+        parser
     }
 
     pub fn parse(mut self) -> Result<(FileHeader, ParseStats), Box<dyn std::error::Error>> {
         self.detect_encoding_and_buffer_bytes()?;
         self.process_stream()?;
         self.finalize_header();
+
+        #[cfg(feature = "progress-bar")]
+        {
+            if let Some(pb) = &self.progress_bar {
+                pb.finish_with_message("✅ Обработка завершена");
+            }
+        }
 
         Ok((self.header, self.stats))
     }
@@ -62,7 +98,7 @@ impl<R: Read> StreamParser<R> {
     fn detect_encoding_and_buffer_bytes(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         const DETECTION_LINES: usize = 20;
         let mut detection_bytes: Vec<u8> = Vec::new();
-        let mut lines_count = 0; // ⭐ Только для ограничения цикла, не для статистики!
+        let mut lines_count = 0;
 
         while lines_count < DETECTION_LINES {
             let mut line_bytes = Vec::new();
@@ -72,27 +108,28 @@ impl<R: Read> StreamParser<R> {
                 break;
             }
 
+            // Проверка длины строки
             if line_bytes.len() > MAX_LINE_LENGTH {
                 self.handle_line_length_exceeded(line_bytes.len())?;
-                // Если не паниковали - обрезаем
                 line_bytes.truncate(MAX_LINE_LENGTH);
             }
 
             detection_bytes.extend_from_slice(&line_bytes);
             self.pending_bytes.push(line_bytes.clone());
-            lines_count += 1; // ⭐ Только для выхода из цикла (не для stats!)
+            lines_count += 1;
         }
 
-        // ⭐ Определяем кодировку по собранным байтам
+        // Определяем кодировку по собранным байтам
         self.encoding = FileEncoding::detect_from_bytes_standard(&detection_bytes);
         self.header.detected_encoding = self.encoding;
         self.header.encoding = Some(format!("{:?}", self.encoding));
+
         Ok(())
     }
 
     /// ⭐ Декодируем и обрабатываем все строки с ПРАВИЛЬНОЙ кодировкой
     fn process_stream(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        // ⭐ Один буфер на все строки
+        // Один буфер на все строки (переиспользуем)
         let mut line_bytes = Vec::with_capacity(1024);
 
         // Обрабатываем pending_bytes
@@ -106,17 +143,16 @@ impl<R: Read> StreamParser<R> {
 
         // Читаем остальной файл
         loop {
-            line_bytes.clear(); // ⭐ Переиспользуем буфер!
+            line_bytes.clear();
             let bytes_read = self.reader.read_until(b'\n', &mut line_bytes)?;
 
             if bytes_read == 0 {
                 break;
             }
 
-            // ⭐ Проверка длины строки
+            // Проверка длины строки
             if line_bytes.len() > MAX_LINE_LENGTH {
                 self.handle_line_length_exceeded(line_bytes.len())?;
-                // Если не паниковали - обрезаем
                 line_bytes.truncate(MAX_LINE_LENGTH);
             }
 
@@ -127,7 +163,7 @@ impl<R: Read> StreamParser<R> {
             }
         }
 
-        // ⭐ Сохраняем общее количество строк в статистику
+        // Сохраняем общее количество строк в статистику
         self.stats.total_lines = self.line_number;
 
         Ok(())
@@ -145,7 +181,6 @@ impl<R: Read> StreamParser<R> {
         };
 
         if LINE_LENGTH_STRICT {
-            // ⭐ Завершаем программу с ошибкой
             eprintln!("❌ Ошибка: {}", error);
             eprintln!(
                 "   Строка #{}: {} байт (максимум {})",
@@ -153,7 +188,6 @@ impl<R: Read> StreamParser<R> {
             );
             return Err(Box::new(error));
         } else {
-            // ⭐ Предупреждение и обрезка
             eprintln!("⚠️  Предупреждение: {}", error);
             eprintln!("   Строка будет обрезана до {} байт", MAX_LINE_LENGTH);
         }
@@ -163,7 +197,16 @@ impl<R: Read> StreamParser<R> {
 
     fn process_line_bytes(&mut self, bytes: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
         let (cow, _, had_errors) = self.encoding.to_encoding().decode(bytes);
+        // В одном месте и счётчик строк и счётчик прогресса, т.к. всё равно любые строки обязательно должны проходить через этот процесс.
         self.line_number += 1;
+        let bytes_len = bytes.len() as u64;
+        // ⭐ Обновляем статистику и прогресс
+        self.stats.add_bytes(bytes_len);
+        #[cfg(feature = "progress-bar")]
+        if let Some(pb) = &self.progress_bar {
+            pb.inc(bytes_len);
+        }
+
         if had_errors {
             eprintln!(
                 "⚠️  Предупреждение: ошибки декодирования в строке #{}",

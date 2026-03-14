@@ -39,7 +39,8 @@ pub struct ParseStats {
     pub account_sections: u64,
     pub document_sections: u64,
     pub documents_by_type: HashMap<String, u64>,
-    pub total_lines: u64, // ⭐ НОВОЕ: общее количество строк
+    pub total_lines: u64,
+    pub total_bytes: u64, // ⭐ НОВОЕ: обработанные байты
 }
 
 impl ParseStats {
@@ -53,5 +54,9 @@ impl ParseStats {
 
     pub fn add_line(&mut self) {
         self.total_lines += 1;
+    }
+
+    pub fn add_bytes(&mut self, bytes: u64) {
+        self.total_bytes += bytes;
     }
 }
