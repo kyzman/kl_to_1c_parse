@@ -1,6 +1,6 @@
 [package]
 name = "load1c"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2024"
 authors = ["Andrew"]
 description = "High-performance parser for 1CClientBankExchange format"
@@ -13,8 +13,9 @@ description = "High-performance parser for 1CClientBankExchange format"
 encoding_rs = "0.8"  # Поддержка Windows-1251, CP-866 и др.
 
 [features]
-default = []
-postgres = []  # Фича для будущей интеграции с БД
+default = ["line-limit-error"]
+line-limit-error = []    # Завершать программу при превышении
+line-limit-truncate = [] # Обрезать строку при превышении
 
 [[bin]]
 name = "load1c"
@@ -23,3 +24,6 @@ path = "src/main.rs"
 [lib]
 name = "load1c"
 path = "src/lib.rs"
+
+[profile.release]
+debug = true

@@ -1,5 +1,27 @@
-use crate::parser::{BUFFER_SIZE, encoding::*, models::*, state::*};
+use crate::parser::{
+    BUFFER_SIZE, LINE_LENGTH_STRICT, MAX_LINE_LENGTH, encoding::*, models::*, state::*,
+};
 use std::io::{BufRead, BufReader, Read};
+
+/// ⭐ Ошибка превышения длины строки
+#[derive(Debug)]
+pub struct LineLengthError {
+    pub line_number: u64,
+    pub actual_length: usize,
+    pub max_length: usize,
+}
+
+impl std::fmt::Display for LineLengthError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Превышена максимальная длина строки #{}: {} байт (максимум {})",
+            self.line_number, self.actual_length, self.max_length
+        )
+    }
+}
+
+impl std::error::Error for LineLengthError {}
 
 pub struct StreamParser<R: Read> {
     reader: BufReader<R>,
@@ -9,7 +31,8 @@ pub struct StreamParser<R: Read> {
     header_buffer: String,
     header_finalized: bool,
     encoding: FileEncoding,
-    pending_bytes: Vec<Vec<u8>>, // ⭐ Храним СЫРЫЕ БАЙТЫ строк, не декодированные строки
+    pending_bytes: Vec<Vec<u8>>,
+    line_number: u64,
 }
 
 impl<R: Read> StreamParser<R> {
@@ -23,6 +46,7 @@ impl<R: Read> StreamParser<R> {
             header_finalized: false,
             encoding: FileEncoding::default_1c(),
             pending_bytes: Vec::new(),
+            line_number: 0,
         }
     }
 
@@ -34,35 +58,35 @@ impl<R: Read> StreamParser<R> {
         Ok((self.header, self.stats))
     }
 
-    /// ⭐ Читает ПОЛНЫЕ строки как БАЙТЫ, определяет кодировку, не декодируя заранее
+    /// ⭐ Читает ПОЛНЫЕ строки как БАЙТЫ, определяет кодировку
     fn detect_encoding_and_buffer_bytes(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         const DETECTION_LINES: usize = 20;
         let mut detection_bytes: Vec<u8> = Vec::new();
-        let mut lines_count = 0;
+        let mut lines_count = 0; // ⭐ Только для ограничения цикла, не для статистики!
 
-        // ⭐ Читаем ПОЛНЫЕ строки как БАЙТЫ (не декодируем!)
         while lines_count < DETECTION_LINES {
             let mut line_bytes = Vec::new();
             let bytes_read = self.reader.read_until(b'\n', &mut line_bytes)?;
 
-            if bytes_read == 0 {
+            if bytes_read == 0 || line_bytes.is_empty() {
                 break;
             }
 
-            // Сохраняем сырые байты для последующего декодирования
+            if line_bytes.len() > MAX_LINE_LENGTH {
+                self.handle_line_length_exceeded(line_bytes.len())?;
+                // Если не паниковали - обрезаем
+                line_bytes.truncate(MAX_LINE_LENGTH);
+            }
+
             detection_bytes.extend_from_slice(&line_bytes);
             self.pending_bytes.push(line_bytes.clone());
-            lines_count += 1;
+            lines_count += 1; // ⭐ Только для выхода из цикла (не для stats!)
         }
 
-        // ⭐ Определяем кодировку по собранным байтам (если не нашли в поле)
-        if self.header.encoding.is_none() {
-            self.encoding = FileEncoding::detect_from_bytes_standard(&detection_bytes);
-            self.header.encoding = Some(format!("{:?}", self.encoding));
-        }
-
+        // ⭐ Определяем кодировку по собранным байтам
+        self.encoding = FileEncoding::detect_from_bytes_standard(&detection_bytes);
         self.header.detected_encoding = self.encoding;
-
+        self.header.encoding = Some(format!("{:?}", self.encoding));
         Ok(())
     }
 
@@ -89,6 +113,13 @@ impl<R: Read> StreamParser<R> {
                 break;
             }
 
+            // ⭐ Проверка длины строки
+            if line_bytes.len() > MAX_LINE_LENGTH {
+                self.handle_line_length_exceeded(line_bytes.len())?;
+                // Если не паниковали - обрезаем
+                line_bytes.truncate(MAX_LINE_LENGTH);
+            }
+
             self.process_line_bytes(&line_bytes)?;
 
             if self.state == ParserState::EndOfFile {
@@ -96,14 +127,48 @@ impl<R: Read> StreamParser<R> {
             }
         }
 
+        // ⭐ Сохраняем общее количество строк в статистику
+        self.stats.total_lines = self.line_number;
+
+        Ok(())
+    }
+
+    /// ⭐ Обработка превышения длины строки
+    fn handle_line_length_exceeded(
+        &self,
+        actual_length: usize,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let error = LineLengthError {
+            line_number: self.line_number,
+            actual_length,
+            max_length: MAX_LINE_LENGTH,
+        };
+
+        if LINE_LENGTH_STRICT {
+            // ⭐ Завершаем программу с ошибкой
+            eprintln!("❌ Ошибка: {}", error);
+            eprintln!(
+                "   Строка #{}: {} байт (максимум {})",
+                self.line_number, actual_length, MAX_LINE_LENGTH
+            );
+            return Err(Box::new(error));
+        } else {
+            // ⭐ Предупреждение и обрезка
+            eprintln!("⚠️  Предупреждение: {}", error);
+            eprintln!("   Строка будет обрезана до {} байт", MAX_LINE_LENGTH);
+        }
+
         Ok(())
     }
 
     fn process_line_bytes(&mut self, bytes: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
         let (cow, _, had_errors) = self.encoding.to_encoding().decode(bytes);
-
+        self.line_number += 1;
         if had_errors {
-            eprintln!("⚠️  Предупреждение: ошибки декодирования в строке");
+            eprintln!(
+                "⚠️  Предупреждение: ошибки декодирования в строке #{}",
+                self.line_number
+            );
         }
 
         let line = cow.trim_end_matches(&['\r', '\n'][..]);
@@ -183,7 +248,7 @@ impl<R: Read> StreamParser<R> {
             let value = value.trim();
             match key {
                 "ВерсияФормата" => header.version = Some(value.to_string()),
-                "Кодировка" => header.encoding = Some(value.to_string()), // кодировка в любом случае уже должна быть определена, поэтому без вариантов
+                "Кодировка" => header.encoding = Some(value.to_string()),
                 "Отправитель" => header.sender = Some(value.to_string()),
                 "Получатель" => header.receiver = Some(value.to_string()),
                 "ДатаСоздания" => header.created_date = Some(value.to_string()),

@@ -3,6 +3,21 @@ pub mod models;
 pub mod state;
 pub mod stream;
 
-/// Размер буфера для чтения файла (можно изменить при компиляции)
-/// Оптимально: 32-256 КБ для баланса между памятью и производительностью
+/// ⭐ Максимальная длина строки в байтах (настраивается при компиляции)
+/// По умолчанию 1 МБ — достаточно для любых реальных файлов 1C
+pub const MAX_LINE_LENGTH: usize = 16 * 1024; // 1 MB
+
+/// ⭐ Политика при превышении длины строки
+/// true = завершить программу с ошибкой
+/// false = обрезать строку до MAX_LINE_LENGTH
+#[cfg(feature = "line-limit-error")]
+pub const LINE_LENGTH_STRICT: bool = true;
+
+#[cfg(feature = "line-limit-truncate")]
+pub const LINE_LENGTH_STRICT: bool = false;
+
+#[cfg(not(any(feature = "line-limit-error", feature = "line-limit-truncate")))]
+pub const LINE_LENGTH_STRICT: bool = false; // По умолчанию обрезаем
+
+/// Размер буфера для чтения файла (64 KB по умолчанию)
 pub const BUFFER_SIZE: usize = 64 * 1024;

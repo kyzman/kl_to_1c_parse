@@ -1,6 +1,6 @@
 use crate::parser::encoding::FileEncoding;
+use std::collections::HashMap;
 
-/// Типы секций в файле обмена
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SectionType {
     Header,
@@ -8,12 +8,11 @@ pub enum SectionType {
     Document(String),
 }
 
-/// Служебная информация из заголовка файла
 #[derive(Debug, Clone, Default)]
 pub struct FileHeader {
     pub version: Option<String>,
-    pub encoding: Option<String>,        // Сырое значение из файла
-    pub detected_encoding: FileEncoding, // Определённая кодировка
+    pub encoding: Option<String>,
+    pub detected_encoding: FileEncoding,
     pub sender: Option<String>,
     pub receiver: Option<String>,
     pub created_date: Option<String>,
@@ -34,13 +33,13 @@ impl FileHeader {
     }
 }
 
-/// Статистика по секциям файла
 #[derive(Debug, Clone, Default)]
 pub struct ParseStats {
     pub total_sections: u64,
     pub account_sections: u64,
     pub document_sections: u64,
-    pub documents_by_type: std::collections::HashMap<String, u64>,
+    pub documents_by_type: HashMap<String, u64>,
+    pub total_lines: u64, // ⭐ НОВОЕ: общее количество строк
 }
 
 impl ParseStats {
@@ -50,5 +49,9 @@ impl ParseStats {
             .documents_by_type
             .entry(doc_type.to_string())
             .or_insert(0) += 1;
+    }
+
+    pub fn add_line(&mut self) {
+        self.total_lines += 1;
     }
 }

@@ -20,6 +20,7 @@ pub fn print_results(header: &FileHeader, stats: &ParseStats) {
     println!("   Всего секций: {}", stats.total_sections);
     println!("   Секций РасчСчет: {}", stats.account_sections);
     println!("   Секций Документ: {}", stats.document_sections);
+    println!("   Всего строк: {}", stats.total_lines); // ⭐ НОВОЕ
 
     if !stats.documents_by_type.is_empty() {
         println!("\n📋 Документы по типам:");
