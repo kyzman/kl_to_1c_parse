@@ -1,5 +1,5 @@
+pub mod config;
 pub mod parser;
-pub mod stats;
+pub mod stats; // ⭐ НОВОЕ
 
-// Экспортируем константу буфера для возможной настройки
-pub use parser::BUFFER_SIZE;
+pub use config::{CliArgs, Config, ConfigLoader};

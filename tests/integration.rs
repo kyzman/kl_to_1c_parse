@@ -33,6 +33,7 @@ fn test_realistic_file_sample() {
     );
 
     // Проверка статистики
+    assert!(stats.total_bytes > 0); // ⭐ Проверяем, что байты считаются
     assert_eq!(stats.total_sections, 5); // 1 Header + 1 РасчСчет + 3 Документ
     assert_eq!(stats.account_sections, 1);
     assert_eq!(stats.document_sections, 3);

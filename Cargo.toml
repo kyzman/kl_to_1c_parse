@@ -1,17 +1,30 @@
 [package]
 name = "load1c"
-version = "0.1.6"
+version = "0.1.7"
 edition = "2024"
 authors = ["Andrew"]
 description = "High-performance parser for 1CClientBankExchange format"
 
 [dependencies]
-# Для буферизированного чтения (в стандартной библиотеке)
-# Для будущего расширения:
-# postgres = { version = "0.19", optional = true }
-# tokio = { version = "1", features = ["full"], optional = true }
-encoding_rs = "0.8"  # Поддержка Windows-1251, CP-866 и др.
-indicatif = { version = "0.17", optional = true }  # ⭐ НОВОЕ
+# Парсинг
+encoding_rs = "0.8"
+
+# Конфигурация
+toml = "0.8"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# CLI аргументы
+clap = { version = "4.4", features = ["derive"] }
+
+# Прогресс-бар (опционально)
+indicatif = { version = "0.17", optional = true }
+
+# Пути к файлам
+dirs = "5.0"
+
+[dev-dependencies]
+tempfile = "3.9"
 
 [features]
 default = ["line-limit-error"]

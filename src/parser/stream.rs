@@ -1,6 +1,5 @@
-use crate::parser::{
-    BUFFER_SIZE, LINE_LENGTH_STRICT, MAX_LINE_LENGTH, encoding::*, models::*, state::*,
-};
+use crate::config::ParserConfig; // ⭐ Импортируем конфиг
+use crate::parser::{encoding::*, models::*, state::*};
 #[cfg(feature = "progress-bar")]
 use indicatif::{ProgressBar, ProgressStyle};
 use std::io::{BufRead, BufReader, Read};
@@ -35,15 +34,18 @@ pub struct StreamParser<R: Read> {
     encoding: FileEncoding,
     pending_bytes: Vec<Vec<u8>>,
     line_number: u64,
-    file_size: u64, // ⭐ НОВОЕ: общий размер файла
+    file_size: u64,         // ⭐ НОВОЕ: общий размер файла
+    max_line_length: usize, // ⭐ Из конфига
+    line_limit_error: bool, // ⭐ Из конфига
     #[cfg(feature = "progress-bar")]
     progress_bar: Option<ProgressBar>, // ⭐ НОВОЕ: прогресс-бар
 }
 
 impl<R: Read> StreamParser<R> {
     pub fn new(reader: R) -> Self {
+        // исключительно для тестов. Некоторые параметры захардкожены.
         Self {
-            reader: BufReader::with_capacity(BUFFER_SIZE, reader),
+            reader: BufReader::with_capacity(64 * 1024, reader),
             state: ParserState::WaitingHeader,
             header: FileHeader::new(),
             stats: ParseStats::default(),
@@ -53,19 +55,43 @@ impl<R: Read> StreamParser<R> {
             pending_bytes: Vec::new(),
             line_number: 0,
             file_size: 0,
+            max_line_length: 16 * 1024, // 16 KB
+            line_limit_error: true,
             #[cfg(feature = "progress-bar")]
             progress_bar: None,
         }
     }
 
-    /// ⭐ НОВОЕ: Создание парсера с известным размером файла (для прогресс-бара)
-    pub fn with_file_size(reader: R, file_size: u64) -> Self {
-        let mut parser = Self::new(reader);
-        parser.file_size = file_size;
+    /// ⭐ НОВОЕ: Создание парсера с конфигурацией
+    pub fn with_config(reader: R, config: &ParserConfig) -> Self {
+        Self {
+            reader: BufReader::with_capacity(config.buffer_size, reader),
+            state: ParserState::WaitingHeader,
+            header: FileHeader::new(),
+            stats: ParseStats::default(),
+            header_buffer: String::new(),
+            header_finalized: false,
+            encoding: FileEncoding::default_1c(),
+            pending_bytes: Vec::new(),
+            line_number: 0,
+            file_size: 0,
+            max_line_length: config.max_line_length,
+            line_limit_error: config.features.line_limit_error,
+            #[cfg(feature = "progress-bar")]
+            progress_bar: if config.features.progress_bar {
+                Some(ProgressBar::new(0))
+            } else {
+                None
+            },
+        }
+    }
 
-        #[cfg(feature = "progress-bar")]
-        {
-            use indicatif::ProgressStyle;
+    /// ⭐ Конструктор с конфигурацией и размером файла (для прогресс-бара)
+    #[cfg(feature = "progress-bar")]
+    pub fn with_config_and_size(reader: R, config: &ParserConfig, file_size: u64) -> Self {
+        let mut parser = Self::with_config(reader, config);
+
+        if config.features.progress_bar {
             let pb = ProgressBar::new(file_size);
             pb.set_style(
                 ProgressStyle::default_bar()
@@ -78,6 +104,27 @@ impl<R: Read> StreamParser<R> {
 
         parser
     }
+
+    // /// ⭐ НОВОЕ: Создание парсера с известным размером файла (для прогресс-бара)
+    // pub fn with_file_size(reader: R, file_size: u64) -> Self {
+    //     let mut parser = Self::new(reader);
+    //     parser.file_size = file_size;
+
+    //     #[cfg(feature = "progress-bar")]
+    //     {
+    //         use indicatif::ProgressStyle;
+    //         let pb = ProgressBar::new(file_size);
+    //         pb.set_style(
+    //             ProgressStyle::default_bar()
+    //                 .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})")
+    //                 .unwrap()
+    //                 .progress_chars("=>-"),
+    //         );
+    //         parser.progress_bar = Some(pb);
+    //     }
+
+    //     parser
+    // }
 
     pub fn parse(mut self) -> Result<(FileHeader, ParseStats), Box<dyn std::error::Error>> {
         self.detect_encoding_and_buffer_bytes()?;
@@ -109,9 +156,9 @@ impl<R: Read> StreamParser<R> {
             }
 
             // Проверка длины строки
-            if line_bytes.len() > MAX_LINE_LENGTH {
+            if line_bytes.len() > self.max_line_length {
                 self.handle_line_length_exceeded(line_bytes.len())?;
-                line_bytes.truncate(MAX_LINE_LENGTH);
+                line_bytes.truncate(self.max_line_length);
             }
 
             detection_bytes.extend_from_slice(&line_bytes);
@@ -151,9 +198,9 @@ impl<R: Read> StreamParser<R> {
             }
 
             // Проверка длины строки
-            if line_bytes.len() > MAX_LINE_LENGTH {
+            if line_bytes.len() > self.max_line_length {
                 self.handle_line_length_exceeded(line_bytes.len())?;
-                line_bytes.truncate(MAX_LINE_LENGTH);
+                line_bytes.truncate(self.max_line_length);
             }
 
             self.process_line_bytes(&line_bytes)?;
@@ -177,19 +224,19 @@ impl<R: Read> StreamParser<R> {
         let error = LineLengthError {
             line_number: self.line_number,
             actual_length,
-            max_length: MAX_LINE_LENGTH,
+            max_length: self.max_line_length,
         };
 
-        if LINE_LENGTH_STRICT {
+        if self.line_limit_error {
             eprintln!("❌ Ошибка: {}", error);
             eprintln!(
                 "   Строка #{}: {} байт (максимум {})",
-                self.line_number, actual_length, MAX_LINE_LENGTH
+                self.line_number, actual_length, self.max_line_length
             );
             return Err(Box::new(error));
         } else {
             eprintln!("⚠️  Предупреждение: {}", error);
-            eprintln!("   Строка будет обрезана до {} байт", MAX_LINE_LENGTH);
+            eprintln!("   Строка будет обрезана до {} байт", self.max_line_length);
         }
 
         Ok(())

@@ -1,52 +1,54 @@
+use load1c::config::{CliArgs, ConfigLoader};
 use load1c::parser::stream::StreamParser;
-use load1c::stats::print_results;
+use load1c::stats::print_results; // ⭐ Импортируем функцию вывода
 use std::fs::File;
 use std::io::BufReader;
-use std::path::Path;
+use std::path::PathBuf;
 use std::time::Instant;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let args: Vec<String> = std::env::args().collect();
+    // Парсим CLI аргументы
+    let args = CliArgs::parse_args();
 
-    if args.len() < 2 {
-        eprintln!("Использование: {} <путь_к_файлу>", args[0]);
-        eprintln!();
-        eprintln!("Опции компиляции:");
-        eprintln!("  --features progress-bar  # Включить прогресс-бар");
-        eprintln!("  --features line-limit-error   # Завершать при превышении длины строки");
-        eprintln!("  --features line-limit-truncate # Обрезать строку при превышении");
-        std::process::exit(1);
-    }
+    // Загружаем конфигурацию
+    let config_paths = if args.config_files.is_empty() {
+        vec!["config/default.toml"]
+    } else {
+        args.config_files.iter().map(|s| s.as_str()).collect()
+    };
 
-    let file_path = &args[1];
+    let base_path = PathBuf::from(".");
+    let loader = ConfigLoader::new(base_path);
+    let mut config = loader.load(&config_paths)?;
 
-    if !Path::new(file_path).exists() {
-        eprintln!("❌ Ошибка: файл '{}' не найден", file_path);
-        std::process::exit(1);
-    }
+    // Применяем CLI аргументы поверх конфига
+    config.apply_cli_args(&args);
 
-    // Получаем размер файла для прогресс-бара
-    let file_size = std::fs::metadata(file_path)?.len();
+    // Открываем файл
+    let file = File::open(&args.file)?;
+    let file_size = std::fs::metadata(&args.file)?.len();
 
-    println!("🔍 Обработка файла: {}", file_path);
+    println!("🔍 Обработка файла: {}", args.file);
     println!(
         "📦 Размер файла: {:.2} MB",
         file_size as f64 / (1024.0 * 1024.0)
     );
     println!();
 
-    let file = File::open(file_path)?;
-
+    // ⭐ Создаём парсер с конфигурацией и размером файла
     #[cfg(feature = "progress-bar")]
-    let parser = StreamParser::with_file_size(BufReader::new(file), file_size);
+    let parser =
+        StreamParser::with_config_and_size(BufReader::new(file), &config.parser, file_size);
 
     #[cfg(not(feature = "progress-bar"))]
-    let parser = StreamParser::new(BufReader::new(file));
+    let parser = StreamParser::with_config(BufReader::new(file), &config.parser);
 
+    // Запускаем парсинг
     let start = Instant::now();
     let (header, stats) = parser.parse()?;
     let elapsed = start.elapsed();
 
+    // ⭐ ВЫВОДИМ статистику через stats.rs
     print_results(&header, &stats);
 
     println!("⏱️  Время обработки: {:.3} сек", elapsed.as_secs_f64());
