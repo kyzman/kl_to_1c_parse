@@ -90,7 +90,6 @@ impl<R: Read> StreamParser<R> {
     #[cfg(feature = "progress-bar")]
     pub fn with_config_and_size(reader: R, config: &ParserConfig, file_size: u64) -> Self {
         let mut parser = Self::with_config(reader, config);
-
         if config.features.progress_bar {
             let pb = ProgressBar::new(file_size);
             pb.set_style(
@@ -104,27 +103,6 @@ impl<R: Read> StreamParser<R> {
 
         parser
     }
-
-    // /// ⭐ НОВОЕ: Создание парсера с известным размером файла (для прогресс-бара)
-    // pub fn with_file_size(reader: R, file_size: u64) -> Self {
-    //     let mut parser = Self::new(reader);
-    //     parser.file_size = file_size;
-
-    //     #[cfg(feature = "progress-bar")]
-    //     {
-    //         use indicatif::ProgressStyle;
-    //         let pb = ProgressBar::new(file_size);
-    //         pb.set_style(
-    //             ProgressStyle::default_bar()
-    //                 .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})")
-    //                 .unwrap()
-    //                 .progress_chars("=>-"),
-    //         );
-    //         parser.progress_bar = Some(pb);
-    //     }
-
-    //     parser
-    // }
 
     pub fn parse(mut self) -> Result<(FileHeader, ParseStats), Box<dyn std::error::Error>> {
         self.detect_encoding_and_buffer_bytes()?;

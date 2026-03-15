@@ -1,6 +1,6 @@
 [package]
 name = "load1c"
-version = "0.1.7"
+version = "0.1.8"
 edition = "2024"
 authors = ["Andrew"]
 description = "High-performance parser for 1CClientBankExchange format"
@@ -20,7 +20,11 @@ clap = { version = "4.4", features = ["derive"] }
 # Прогресс-бар (опционально)
 indicatif = { version = "0.17", optional = true }
 
-# Пути к файлам
+# Поиск файлов
+glob = "0.3"
+walkdir = "2.4"
+
+# Пути
 dirs = "5.0"
 
 [dev-dependencies]

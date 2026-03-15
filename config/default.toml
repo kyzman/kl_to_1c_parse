@@ -2,35 +2,40 @@
 # ⭐ Базовая конфигурация load1c
 # ════════════════════════════════════════════════════
 
-# ⭐ Включение дополнительных конфигов
 [includes]
-files = []
+files = ["includes/inputs.toml"]
 
 # ════════════════════════════════════════════════════
-# ⭐ Настройки парсера (обязательные)
+# ⭐ Настройки парсера
 # ════════════════════════════════════════════════════
 [parser]
-buffer_size = 65536              # 64 KB
-max_line_length = 16384        # 16 KB
-encoding_detection_size = 1024   # 1 KB
+buffer_size = 65536
+max_line_length = 32768
+encoding_detection_size = 2048
 detection_lines = 10
 
 [parser.features]
-progress_bar = false
+progress_bar = true
 line_limit_error = true
 validate_checksums = false
 
 # ════════════════════════════════════════════════════
-# ⭐ Настройки вывода (опциональные)
+# ⭐ Настройки вывода
 # ════════════════════════════════════════════════════
 [output]
-format = "table"    # table, json, csv
+format = "table"
 verbose = false
 # file = "output.txt"
 
+# ⭐ Режим вывода статистики:
+#   aggregated  - только общая (по умолчанию)
+#   per_file    - только по каждому файлу
+#   both        - и общая, и по каждому файлу
+stats_mode = "both"
+
 # ════════════════════════════════════════════════════
-# ⭐ Настройки логирования (опциональные)
+# ⭐ Настройки логирования
 # ════════════════════════════════════════════════════
 [logging]
-level = "info"      # debug, info, warn, error
+level = "info"
 # file = "logs/load1c.log"
